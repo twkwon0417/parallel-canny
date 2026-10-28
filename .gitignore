@@ -1,0 +1,6 @@
+canny
+*.pgm
+*.o
+.DS_Store
+.idea/
+cmake-build-*/
