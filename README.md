@@ -1,51 +1,36 @@
-# Parallel Canny Edge Detector
+# Parallel Canny edge detector
 
-An OpenMP implementation of the Canny edge detector in C++, written as the final project of the Parallel Programming course at Konkuk University (Oct – Dec 2025).
+Final project for the Parallel Programming course at Konkuk University (October to December 2025): make a Canny edge detector fast with OpenMP while keeping its output within 1% of a reference implementation.
 
-The course provided `main.cpp`: PGM input/output, a single-threaded reference implementation, timing, and a PASS/FAIL check against the reference. My work is the optimized kernel in `student_kernel.hpp`.
+The course gave us `main.cpp`, which handles PGM input and output, runs the single-threaded reference, times both versions and checks the result. Everything in `student_kernel.hpp` is my work.
 
-## Result
+## Results
 
-On a 2000×2000 input, measured on my home server (NucBox K8 Plus, `g++ -fopenmp -march=native`):
+2000×2000 input on my home server (NucBox K8 Plus), built with `g++ -fopenmp -march=native`:
 
 | Threads | Time |
 |---|---|
 | 1 | 97.43 ms |
-| 8 | **17.46 ms** (about 5.6× faster) |
+| 8 | 17.46 ms |
 | 18 | 22.22 ms |
 
-The output passed the course check (at most 1% of pixels differing from the reference). Past 8 threads the run got slower again.
+That is about 5.6 times faster at 8 threads, and the output passed the 1% mismatch check. With more than 8 threads it got slower again. On a 10000×10000 input, 16 threads took 559.97 ms where the single-threaded reference took 15,745.7 ms. All of these are single runs copied from the terminal, not averages.
 
-On a 10000×10000 input, 16 threads took 559.97 ms against 15,745.7 ms for the single-threaded reference.
+## What the kernel does
 
-These are single runs recorded from the terminal, not averages.
+All stages are parallelized with OpenMP.
 
-## Pipeline and optimizations
-
-Every stage runs in parallel with OpenMP.
-
-1. **Gaussian blur (5×5).** Split into a horizontal and a vertical 5-tap pass. The symmetric kernel `[1 4 6 4 1]` lets each pass add mirrored pixels before multiplying, and a sliding window reuses loaded values across neighboring outputs.
-2. **Sobel gradient, magnitude, and direction in one pass.** The three steps are fused, so the separate `gx` and `gy` images are never written to memory. Direction is quantized to four bins with a tan(22.5°) comparison instead of `atan2`.
-3. **Non-maximum suppression.** The inner region looks up neighbor offsets in a table indexed by direction, which removes the per-pixel branch on direction. Image borders go through a separate path with bounds checks.
-4. **Double threshold.** Thresholds adapt to the image: high = mean + standard deviation of the thinned magnitudes, low = 0.4 × high. The mean and variance come from an OpenMP reduction.
-5. **Hysteresis as a parallel wavefront BFS.** The reference follows weak edges with a serial stack. I replaced it with a breadth-first search in waves:
-   - strong pixels form the first wave
-   - each thread expands its share of the current wave into a private list for the next wave
-   - a weak pixel joins the edge only if a compare-and-swap changes it from 1 to 255, so each weak pixel is claimed by exactly one thread and is never added twice
-   - the private lists are merged and the next wave starts, until no wave is left
+1. Gaussian blur, split into a horizontal and a vertical 5-tap pass. The kernel `[1 4 6 4 1]` is symmetric, so mirrored pixels are added before multiplying, and the loaded pixels shift through registers as the window moves along the row.
+2. Sobel gradient, magnitude and direction in a single loop, so the `gx` and `gy` images are never stored. Direction is binned into four angles by comparing against tan(22.5°) and tan(67.5°) instead of calling `atan2`.
+3. Non-maximum suppression with the two neighbor offsets looked up from a table by direction, which removes the branch on direction for interior pixels. Border pixels take a separate, bounds-checked path.
+4. Double threshold, with high = mean + standard deviation of the thinned magnitudes and low = 0.4 × high. Mean and variance come from an OpenMP reduction.
+5. Hysteresis. The reference follows weak edges with a serial stack. I changed it to a breadth-first search done in waves: strong pixels form the first wave, each thread expands its part of the wave into its own list, and a weak neighbor is taken with a compare-and-swap from 1 to 255. Only the thread whose swap succeeds adds the pixel, so nothing is added twice. The lists are merged into the next wave until no wave is left.
 
 ## Build and run
 
 ```bash
 g++ -O2 -fopenmp -march=native main.cpp -o canny
-./canny input.pgm output.pgm 8      # input, output, number of threads
+./canny input.pgm output.pgm 8      # input, output, thread count
 ```
 
-Input and output are 8-bit binary PGM (P5) images.
-
-## Files
-
-| File | Contents |
-|---|---|
-| `main.cpp` | Course-provided driver: PGM I/O, reference implementation, timing, verification |
-| `student_kernel.hpp` | My optimized Canny implementation |
+Input and output are 8-bit binary PGM (P5).

@@ -1,12 +1,5 @@
-// student_kernel.hpp
-// Optimized Canny edge detection with OpenMP
-//
-// - Symmetric 5-tap Gaussian passes with a sliding window
-// - Fused Sobel, magnitude, and direction quantization
-// - Non-maximum suppression with a direction lookup table
-// - Hysteresis as a parallel wavefront BFS with compare-and-swap
-//
-// Compile: g++ -fopenmp -march=native main.cpp -o canny
+// Canny edge detection kernel (Parallel Programming final project).
+// Build: g++ -fopenmp -march=native main.cpp -o canny
 
 #pragma once
 #include <algorithm>
@@ -18,9 +11,7 @@
 
 namespace student {
 
-// ============================================================================
-// GAUSSIAN 5x1 (Horizontal): Symmetric Kernel Optimization
-// ============================================================================
+// Horizontal 5-tap Gaussian blur
 static void gaussian5x1(const std::vector<uint8_t> &__restrict in,
                         std::vector<float> &__restrict tmp, int W, int H) {
   constexpr float k_outer = 1.0f;
@@ -68,9 +59,7 @@ static void gaussian5x1(const std::vector<uint8_t> &__restrict in,
   }
 }
 
-// ============================================================================
-// GAUSSIAN 1x5 (Vertical)
-// ============================================================================
+// Vertical 5-tap Gaussian blur
 static void gaussian1x5_from_tmp(const std::vector<float> &__restrict tmp,
                                  std::vector<float> &__restrict out, int W,
                                  int H) {
@@ -80,7 +69,7 @@ static void gaussian1x5_from_tmp(const std::vector<float> &__restrict tmp,
   const float *src = tmp.data();
   float *dst = out.data();
 
-  // Top boundary rows - parallelize for 8k+ images
+  // top border rows (parallel only for very wide images)
   for (int y = 0; y < std::min(2, H); ++y) {
     const float *row0 = src + (size_t)std::max(0, y - 2) * W;
     const float *row1 = src + (size_t)std::max(0, y - 1) * W;
@@ -113,7 +102,7 @@ static void gaussian1x5_from_tmp(const std::vector<float> &__restrict tmp,
     }
   }
 
-  // Bottom boundary rows - parallelize for 8k+ images
+  // bottom border rows
   for (int y = std::max(2, H - 2); y < H; ++y) {
     const float *row0 = src + (size_t)std::max(0, y - 2) * W;
     const float *row1 = src + (size_t)std::max(0, y - 1) * W;
@@ -130,9 +119,7 @@ static void gaussian1x5_from_tmp(const std::vector<float> &__restrict tmp,
   }
 }
 
-// ============================================================================
-// FUSED SOBEL + GRADIENT
-// ============================================================================
+// Sobel gradient, magnitude, and direction in one pass
 static void sobel_and_grad(const std::vector<float> &in,
                            std::vector<float> &mag, std::vector<uint8_t> &dir,
                            int W, int H) {
@@ -283,9 +270,7 @@ static void sobel_and_grad(const std::vector<float> &in,
   process_row(src + (H - 2) * W, src + (H - 1) * W, src + (H - 1) * W, H - 1);
 }
 
-// ============================================================================
-// NON-MAXIMUM SUPPRESSION: Branchless with LUT
-// ============================================================================
+// Non-maximum suppression
 static inline void process_nms_boundary(const float *mag, const uint8_t *dir,
                                         float *thin, int x, int y, int W,
                                         int H) {
@@ -323,7 +308,7 @@ static void nonmax_supp(const std::vector<float> &mag,
   const int offset1[4] = {-1, -W + 1, -W, -W - 1};
   const int offset2[4] = {+1, +W - 1, +W, +W + 1};
 
-  // Boundaries - parallelize for 8k+ images
+  // border pixels
 #pragma omp parallel for schedule(static) if (W >= 8000)
   for (int x = 0; x < W; ++x) {
     process_nms_boundary(p_mag, p_dir, p_thin, x, 0, W, H);
@@ -335,7 +320,7 @@ static void nonmax_supp(const std::vector<float> &mag,
     process_nms_boundary(p_mag, p_dir, p_thin, W - 1, y, W, H);
   }
 
-  // Inner zone: branchless NMS
+  // inner pixels
 #pragma omp parallel for schedule(static)
   for (int y = 1; y < H - 1; ++y) {
     int row_base = y * W;
@@ -351,9 +336,7 @@ static void nonmax_supp(const std::vector<float> &mag,
   }
 }
 
-// ============================================================================
-// DOUBLE THRESHOLD
-// ============================================================================
+// Double threshold
 static void double_threshold(const std::vector<float> &thin,
                              std::vector<uint8_t> &edges, float lowT,
                              float highT, int W, int H) {
@@ -368,9 +351,7 @@ static void double_threshold(const std::vector<float> &thin,
   }
 }
 
-// ============================================================================
-// HYSTERESIS: Parallel Wavefront BFS
-// ============================================================================
+// Hysteresis, expanded one BFS wave at a time
 static void hysteresis(std::vector<uint8_t> &edges, int W, int H) {
   const int total = W * H;
   uint8_t *data = edges.data();
@@ -451,9 +432,7 @@ static void hysteresis(std::vector<uint8_t> &edges, int W, int H) {
   }
 }
 
-// ============================================================================
-// MAIN CANNY PIPELINE
-// ============================================================================
+// Full pipeline
 static void canny(const std::vector<uint8_t> &in, std::vector<uint8_t> &out,
                   int W, int H) {
   const int total_pixels = W * H;
@@ -467,7 +446,7 @@ static void canny(const std::vector<uint8_t> &in, std::vector<uint8_t> &out,
   sobel_and_grad(blur, mag, dir, W, H);
   nonmax_supp(mag, dir, thin, W, H);
 
-  // Auto threshold from thin values
+  // thresholds from the mean and stddev of the thinned image
   double sum = 0.0, sum2 = 0.0;
 #pragma omp parallel for reduction(+ : sum, sum2)
   for (int i = 0; i < total_pixels; ++i) {
